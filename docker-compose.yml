@@ -1,0 +1,49 @@
+# Paperclip — self-hosted (Synology / Portainer)
+#
+# Opção A (padrão): usa a imagem publicada no GHCR do seu fork
+#   (gerada pelo workflow .github/workflows/docker.yml em push para master / tag v*).
+# Opção B: builda localmente a partir deste repositório (veja bloco comentado).
+#
+# Dados: ficam em bind mounts no host (NAS). Já estão persistidos — nada a migrar.
+# A migration 0125 (adapter persistence + fallback) é aplicada no boot
+# (PAPERCLIP_MIGRATION_AUTO_APPLY=true). É aditiva/não destrutiva.
+
+services:
+  paperclip:
+    image: ghcr.io/godextreme/paperclip:latest
+    # --- Opção B: buildar localmente em vez de puxar do GHCR ---
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    container_name: paperclip
+    restart: unless-stopped
+
+    ports:
+      - "3100:3100"
+
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3100"
+      SERVE_UI: "true"
+
+      PAPERCLIP_HOME: "/paperclip"
+      PAPERCLIP_INSTANCE_ID: "default"
+      PAPERCLIP_CONFIG: "/paperclip/instances/default/config.json"
+
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
+
+      # Aplica migrations pendentes (inclui a 0125) no startup, contra o banco existente.
+      PAPERCLIP_MIGRATION_AUTO_APPLY: "true"
+
+      # UID/GID do dono dos arquivos no NAS. Ajuste se tiver problema de permissão
+      # nos bind mounts (Synology costuma usar 1000:1000 para o primeiro usuário).
+      USER_UID: "1000"
+      USER_GID: "1000"
+
+    volumes:
+      # Dados do Paperclip (Postgres embarcado, config, secrets).
+      - /volume1/docker/paperclip:/paperclip
+      # Logins/credenciais dos CLIs dos adapters (preservam autenticação).
+      - /volume1/docker/paperclip/codex:/home/node/.codex
+      - /volume1/docker/paperclip/claude:/home/node/.claude
