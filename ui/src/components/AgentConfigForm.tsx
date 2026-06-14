@@ -52,7 +52,7 @@ import { shouldShowLegacyWorkingDirectoryField } from "../lib/legacy-agent-confi
 import { listAdapterOptions, listVisibleAdapterTypes } from "../adapters/metadata";
 import { getAdapterDisplay, getAdapterLabel } from "../adapters/adapter-display-registry";
 import { useDisabledAdaptersSync } from "../adapters/use-disabled-adapters";
-import { buildAgentUpdatePatch, type AgentConfigOverlay } from "../lib/agent-config-patch";
+import { ADAPTER_AGNOSTIC_KEYS, buildAgentUpdatePatch, type AgentConfigOverlay } from "../lib/agent-config-patch";
 import { useAdapterCapabilities } from "../adapters/use-adapter-capabilities";
 import { filterAcpxModelsByAgent } from "../lib/acpx-model-filter";
 import { resolveForcedKubernetesEnvironment } from "../lib/forced-kubernetes-environment";
@@ -114,6 +114,37 @@ const EMPTY_ENV: Record<string, EnvBinding> = {};
 
 export function supportsAdapterModelRefresh(adapterType: string): boolean {
   return adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "acpx_local";
+}
+
+/**
+ * Resolve the base adapter config used to read field values for display.
+ *
+ * When the adapter type is switched in the form (before saving), adapter-specific
+ * fields (model, command, options, ...) must NOT fall back to the previously
+ * active adapter's saved config — otherwise the old adapter's values bleed into
+ * the new adapter's form. Instead, base reads on the new type's archived config
+ * (restoring its previously-saved settings, if any), preserving only the
+ * adapter-agnostic keys (env, cwd, prompt templates, timeouts) from the current
+ * config.
+ */
+export function resolveAdapterConfigBase(
+  agent: {
+    adapterType: string;
+    adapterConfig?: Record<string, unknown> | null;
+    adapterConfigArchive?: Record<string, Record<string, unknown>> | null;
+  },
+  switchedAdapterType: string | undefined,
+): Record<string, unknown> {
+  const saved = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+  if (switchedAdapterType === undefined || switchedAdapterType === agent.adapterType) {
+    return saved;
+  }
+  const archived = (agent.adapterConfigArchive?.[switchedAdapterType] ?? {}) as Record<string, unknown>;
+  const preserved: Record<string, unknown> = {};
+  for (const key of ADAPTER_AGNOSTIC_KEYS) {
+    if (saved[key] !== undefined) preserved[key] = saved[key];
+  }
+  return { ...preserved, ...archived };
 }
 
 function isOverlayDirty(o: AgentConfigOverlay): boolean {
@@ -331,7 +362,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   }, [isCreate, props.onDirtyChange, props.onSaveActionChange, props.onCancelActionChange]);
 
   // ---- Resolve values ----
-  const config = !isCreate ? ((props.agent.adapterConfig ?? {}) as Record<string, unknown>) : {};
+  const config = !isCreate ? resolveAdapterConfigBase(props.agent, overlay.adapterType) : {};
   const runtimeConfig = !isCreate ? ((props.agent.runtimeConfig ?? {}) as Record<string, unknown>) : {};
   const heartbeat = !isCreate ? ((runtimeConfig.heartbeat ?? {}) as Record<string, unknown>) : {};
 
