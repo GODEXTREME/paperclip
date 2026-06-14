@@ -1,0 +1,68 @@
+# Paperclip — TESTE com BUILD LOCAL, isolado da produção (sem GHCR).
+#
+# Valida no Portainer/NAS que: a imagem builda, sobe, aplica a migration 0102 e
+# mostra os seus dados — SEM tocar na produção e SEM precisar:
+#   - tornar o pacote do GHCR público, nem
+#   - configurar PAT/registry no Portainer.
+#
+# ⚠️ NÃO aponte este teste para /volume1/docker/paperclip (produção): dois
+# Postgres embarcados no mesmo diretório corrompem o banco. Use uma CÓPIA.
+#
+# PREPARO (uma vez, via SSH no NAS) — copie os dados para um diretório de teste:
+#   sudo docker stop paperclip            # pare a produção p/ cópia consistente
+#   sudo cp -a /volume1/docker/paperclip /volume1/docker/paperclip-test
+#   sudo docker start paperclip           # volte a produção
+#
+# DEPLOY DO TESTE:
+#   Portainer → Stacks → Add stack → Repository:
+#     - Repository URL:       https://github.com/GODEXTREME/paperclip
+#     - Reference:            refs/heads/master  (ou a branch desejada)
+#     - Compose path:         docker-compose.build.yml
+#   ou via SSH:
+#     docker compose -f docker-compose.build.yml up -d --build
+#
+# VALIDE:
+#   - logs: "Applying N pending migrations" + "Embedded PostgreSQL ready"
+#   - acesse http://<nas>:3101 e confira que seus dados aparecem (cópia)
+#
+# LIMPEZA (após validar):
+#   docker compose -f docker-compose.build.yml down
+#   sudo rm -rf /volume1/docker/paperclip-test
+#
+# Observação: o build é pesado (pnpm install + builds + CLIs); em NAS pode
+# demorar e exigir RAM. Se travar por recursos, teste a imagem do GHCR.
+
+services:
+  paperclip-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: paperclip:local-test
+    container_name: paperclip-test
+    restart: "no"
+
+    ports:
+      - "3101:3100"   # porta separada da produção (3100)
+
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3100"
+      SERVE_UI: "true"
+
+      PAPERCLIP_HOME: "/paperclip"
+      PAPERCLIP_INSTANCE_ID: "default"
+      PAPERCLIP_CONFIG: "/paperclip/instances/default/config.json"
+
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
+
+      PAPERCLIP_MIGRATION_AUTO_APPLY: "true"
+
+      USER_UID: "1000"
+      USER_GID: "1000"
+
+    volumes:
+      # CÓPIA isolada dos dados — a produção em /volume1/docker/paperclip fica intacta.
+      - /volume1/docker/paperclip-test:/paperclip
+      - /volume1/docker/paperclip-test/codex:/home/node/.codex
+      - /volume1/docker/paperclip-test/claude:/home/node/.claude
