@@ -1,7 +1,38 @@
 import { describe, expect, it } from "vitest";
 import type { Environment } from "@paperclipai/shared";
-import { supportsAdapterModelRefresh } from "./AgentConfigForm";
+import { resolveAdapterConfigBase, supportsAdapterModelRefresh } from "./AgentConfigForm";
 import { resolveForcedKubernetesEnvironment } from "../lib/forced-kubernetes-environment";
+
+describe("resolveAdapterConfigBase", () => {
+  const agent = {
+    adapterType: "codex_local",
+    adapterConfig: { model: "gpt-5-codex", cwd: "/work", env: { A: { binding: "x" } } },
+    adapterConfigArchive: {
+      claude_local: { model: "opus", permissionMode: "acceptEdits" },
+    },
+  };
+
+  it("returns the saved config when the adapter type is not switched", () => {
+    expect(resolveAdapterConfigBase(agent, undefined)).toEqual(agent.adapterConfig);
+    expect(resolveAdapterConfigBase(agent, "codex_local")).toEqual(agent.adapterConfig);
+  });
+
+  it("does not bleed the previous adapter's specific fields when switching to an unconfigured type", () => {
+    const base = resolveAdapterConfigBase(agent, "gemini_local");
+    // Adapter-specific fields from codex must NOT appear.
+    expect(base.model).toBeUndefined();
+    // Adapter-agnostic keys are preserved for display.
+    expect(base.cwd).toBe("/work");
+    expect(base.env).toEqual({ A: { binding: "x" } });
+  });
+
+  it("restores the archived config (plus agnostic keys) when switching to a previously-configured type", () => {
+    const base = resolveAdapterConfigBase(agent, "claude_local");
+    expect(base.model).toBe("opus");
+    expect(base.permissionMode).toBe("acceptEdits");
+    expect(base.cwd).toBe("/work"); // agnostic key preserved
+  });
+});
 
 describe("supportsAdapterModelRefresh", () => {
   it("enables the model refresh action for Claude, Codex, and ACPX adapters", () => {
