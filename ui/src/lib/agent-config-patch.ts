@@ -21,7 +21,7 @@ export interface AgentConfigOverlay {
   modelProfiles?: { cheap?: AgentModelProfileOverlay };
 }
 
-const ADAPTER_AGNOSTIC_KEYS = [
+export const ADAPTER_AGNOSTIC_KEYS = [
   "env",
   "promptTemplate",
   "instructionsFilePath",
