@@ -1,116 +1,97 @@
-# Migração segura para o compose com build próprio (sem perder dados)
+# Self-host: publicar a imagem no GHCR e usar no Portainer
 
-Você já tem um Paperclip rodando a partir de `ghcr.io/paperclipai/paperclip:latest`
-sem volume declarado. Isso significa que seus dados (Postgres **embarcado**,
-config e secrets em `/paperclip`) estão em um **volume anônimo** criado pelo
-Docker. O novo `docker-compose.yml` deste repositório builda o código modificado
-e usa um volume **nomeado** (`paperclip-data`). Os passos abaixo movem seus dados
-do volume anônimo para o nomeado, sem perda.
+Seu setup usa **bind mounts** no NAS, então **seus dados já estão seguros no
+disco** (`/volume1/docker/paperclip`) — não há volume anônimo para migrar. Trocar
+de imagem/compose não apaga nada; o container novo apenas reabre o mesmo diretório.
 
-> Execute na **máquina onde o Paperclip está rodando hoje**.
+Conjunto de dados persistidos hoje:
 
-## 0. Pré-checagem — descubra o volume anônimo atual
+- `/volume1/docker/paperclip` → `/paperclip` (Postgres embarcado, config, secrets)
+- `/volume1/docker/paperclip/codex` → `/home/node/.codex` (login do Codex CLI)
+- `/volume1/docker/paperclip/claude` → `/home/node/.claude` (login do Claude CLI)
 
-```bash
-# Nome do volume anônimo montado em /paperclip do container atual:
-OLD_VOL=$(docker inspect -f \
-  '{{ range .Mounts }}{{ if eq .Destination "/paperclip" }}{{ .Name }}{{ end }}{{ end }}' \
-  paperclip)
-echo "Volume atual: $OLD_VOL"
-```
-
-Se `OLD_VOL` vier vazio, o container pode estar usando bind mount ou outro nome —
-rode `docker inspect paperclip | grep -A3 Mounts` e ajuste os comandos.
-
-## 1. Pare o container atual (NÃO remova o volume)
-
-```bash
-# Se você subiu com o compose antigo:
-docker compose -f docker-compose.antigo.yml stop
-# ou, se foi container avulso:
-docker stop paperclip
-```
-
-Parar é importante: garante que o Postgres embarcado não esteja escrevendo
-durante a cópia (consistência do banco).
-
-> ⚠️ Nunca use `docker compose down -v` nem `docker volume rm` no volume antigo
-> até confirmar que a migração deu certo.
-
-## 2. Backup do volume antigo para um arquivo no host (rede de segurança)
-
-```bash
-docker run --rm -v "$OLD_VOL":/from -v "$PWD":/backup alpine \
-  tar czf /backup/paperclip-backup-$(date +%Y%m%d-%H%M%S).tar.gz -C /from .
-ls -lh paperclip-backup-*.tar.gz
-```
-
-Guarde esse `.tar.gz`. Se algo der errado, ele restaura tudo.
-
-## 3. Crie o volume nomeado e copie os dados
-
-```bash
-docker volume create paperclip-data
-
-docker run --rm -v "$OLD_VOL":/from -v paperclip-data:/to alpine \
-  sh -c 'cp -a /from/. /to/ && echo OK'
-```
-
-Verifique que a cópia tem conteúdo:
-
-```bash
-docker run --rm -v paperclip-data:/data alpine sh -c 'ls -la /data && du -sh /data'
-```
-
-## 4. Suba o novo compose (build do código modificado)
-
-Coloque o novo `docker-compose.yml` (deste repositório) na raiz do projeto e:
-
-```bash
-docker compose build        # builda sua imagem modificada (paperclip:local)
-docker compose up -d
-docker compose logs -f paperclip
-```
-
-No log, procure por:
-
-- `Applying N pending migrations for Embedded PostgreSQL` (a 0102 sendo aplicada), e
-- `Embedded PostgreSQL ready`.
-
-Acesse `http://<host>:3100` e confirme que seus dados (companies, agents, issues)
-estão lá.
-
-## 5. Limpeza (somente depois de confirmar tudo)
-
-```bash
-# Remova o container antigo, se ainda existir:
-docker rm paperclip-antigo 2>/dev/null || true
-# O volume anônimo antigo pode ser removido após validar:
-# docker volume rm "$OLD_VOL"
-```
+A migration `0102` (adapter persistence + fallback) é **aditiva** (`ADD COLUMN`) e
+é aplicada no boot via `PAPERCLIP_MIGRATION_AUTO_APPLY=true`.
 
 ---
 
-## Rollback
+## Passo 1 — Habilitar GitHub Actions no seu fork (uma vez)
 
-Se precisar voltar ao estado anterior:
+Forks vêm com Actions desabilitado. Os workflows aparecem como "active" na API,
+mas **não rodam** até você liberar:
+
+1. Vá em `https://github.com/GODEXTREME/paperclip/actions`
+2. Clique em **"I understand my workflows, go ahead and enable them"**.
+
+> Sem esse passo, nenhuma imagem é publicada.
+
+## Passo 2 — Publicar a imagem no GHCR
+
+O workflow `.github/workflows/docker.yml` já builda (linux/amd64 + arm64) e publica
+em `ghcr.io/godextreme/paperclip`. Ele dispara em:
+
+- **push para `master`** → tag `:latest` (+ `:sha-…`)
+- **tag `v*`** → tags semver (`:1.2.3`, `:1.2`)
+- **manualmente** (`workflow_dispatch`) → aba *Actions → Docker → Run workflow*
+
+Como a feature já está no `master`, basta **rodar o workflow** (Run workflow) ou
+criar uma tag:
 
 ```bash
-docker compose down                 # mantém o volume paperclip-data
-# Restaure o backup para um volume novo, se necessário:
-docker volume create paperclip-restore
-docker run --rm -v paperclip-restore:/to -v "$PWD":/backup alpine \
-  sh -c 'tar xzf /backup/paperclip-backup-XXXX.tar.gz -C /to'
+git tag v0.1.0 && git push origin v0.1.0
 ```
 
-E suba novamente apontando para o volume restaurado.
+Acompanhe em *Actions → Docker*. Ao final, a imagem estará em:
+
+```
+ghcr.io/godextreme/paperclip:latest
+```
+
+## Passo 3 — Tornar o pacote acessível ao Portainer
+
+Por padrão, o pacote no GHCR nasce **privado**. Duas opções:
+
+- **Simples:** torne o pacote público.
+  GitHub → seu perfil → *Packages* → `paperclip` → *Package settings* →
+  *Change visibility* → **Public**. (Portainer puxa sem login.)
+- **Privado:** crie um *Personal Access Token* (classic) com escopo `read:packages`
+  e configure o registry no Portainer (*Registries → Add registry → Custom*,
+  URL `ghcr.io`, usuário = seu login, senha = o token).
+
+## Passo 4 — Apontar o Portainer para a imagem
+
+Use o `docker-compose.yml` deste repositório (stack no Portainer). Ele usa
+`image: ghcr.io/godextreme/paperclip:latest` e os seus bind mounts.
+
+No Portainer:
+
+1. *Stacks → Add stack* → cole o `docker-compose.yml` (ou aponte para o repo).
+2. *Deploy the stack*.
+3. *Containers → paperclip → Logs* e confira:
+   - `Applying N pending migrations for Embedded PostgreSQL` (a 0102), e
+   - `Embedded PostgreSQL ready`.
+
+Para atualizar no futuro: republique a imagem (Passo 2) e no Portainer faça
+*Recreate* / *Pull and redeploy* da stack.
+
+---
+
+## Backup recomendado (rede de segurança)
+
+Mesmo sem risco de perda na troca de imagem, faça um backup do diretório de dados
+antes de atualizar (idealmente com o container parado, para consistência do banco):
+
+```bash
+# No NAS (via SSH), com o container parado:
+tar czf paperclip-backup-$(date +%Y%m%d-%H%M%S).tar.gz -C /volume1/docker/paperclip .
+```
 
 ## Notas
 
-- **Exposição `private` + `authenticated`** funciona com Postgres embarcado.
-  Só `PAPERCLIP_DEPLOYMENT_EXPOSURE: public` exigiria `DATABASE_URL` externo.
-- A migration `0102_agent_adapter_persistence_fallback` apenas **adiciona
-  colunas** (`adapter_config_archive`, `fallback_adapter_type`, `fallback_state`)
-  — é não destrutiva e reversível por restore do backup.
-- Se algum dia migrar para **Postgres externo**, troque o volume embarcado por
-  `DATABASE_URL` e use `docker/docker-compose.yml` como referência.
+- **Build local em vez de GHCR:** descomente o bloco `build:` no `docker-compose.yml`
+  (Opção B) — útil para testar sem publicar.
+- **Arquitetura:** o workflow publica amd64 e arm64, cobrindo Synology Intel/AMD e ARM.
+- **Permissões nos bind mounts:** se aparecer erro de permissão, ajuste `USER_UID`/
+  `USER_GID` no compose para o dono dos arquivos em `/volume1/docker/paperclip`.
+- **`private` + `authenticated`** funciona com Postgres embarcado; só
+  `PAPERCLIP_DEPLOYMENT_EXPOSURE: public` exigiria `DATABASE_URL` externo.
