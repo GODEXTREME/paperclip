@@ -481,6 +481,7 @@ export type {
   IssueGraphLivenessAutoRecoveryPreviewItem,
   BackupRetentionPolicy,
   Agent,
+  AdapterFallbackState,
   AgentAccessState,
   AgentChainOfCommandEntry,
   AgentDetail,

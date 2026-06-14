@@ -140,6 +140,7 @@ export type {
 } from "./adapter-skills.js";
 export type {
   Agent,
+  AdapterFallbackState,
   AgentAccessState,
   AgentChainOfCommandEntry,
   AgentDetail,

@@ -120,6 +120,7 @@ function isOverlayDirty(o: AgentConfigOverlay): boolean {
   return (
     Object.keys(o.identity).length > 0 ||
     o.adapterType !== undefined ||
+    o.fallbackAdapterType !== undefined ||
     Object.keys(o.adapterConfig).length > 0 ||
     Object.keys(o.heartbeat).length > 0 ||
     Object.keys(o.runtime).length > 0 ||
@@ -1096,6 +1097,19 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     }
                     set!(nextValues);
                   } else {
+                    // Restore this adapter's previously-saved config (if the agent
+                    // has been configured with it before) so switching back doesn't
+                    // lose those settings. Falls back to blanked defaults otherwise.
+                    const archived = props.agent.adapterConfigArchive?.[t];
+                    if (archived && Object.keys(archived).length > 0) {
+                      setOverlay((prev) => ({
+                        ...prev,
+                        adapterType: t,
+                        modelProfiles: { cheap: { cleared: true } },
+                        adapterConfig: { ...archived },
+                      }));
+                      return;
+                    }
                     // Clear all adapter config and explicitly blank out model + effort/mode keys
                     // so the old adapter's values don't bleed through via eff()
                     setOverlay((prev) => ({
@@ -1125,6 +1139,26 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     }));
                   }
                 }}
+              />
+            </Field>
+          )}
+
+          {showAdapterTypeField && !isCreate && (
+            <Field
+              label="Fallback adapter"
+              hint="When the primary adapter hits its usage limit, the agent automatically switches to this adapter so work keeps going, then reverts once the primary's usage window resets."
+            >
+              <FallbackAdapterDropdown
+                value={
+                  overlay.fallbackAdapterType !== undefined
+                    ? overlay.fallbackAdapterType
+                    : (props.agent.fallbackAdapterType ?? null)
+                }
+                primaryAdapterType={adapterType}
+                disabledTypes={disabledTypes}
+                onChange={(next) =>
+                  setOverlay((prev) => ({ ...prev, fallbackAdapterType: next }))
+                }
               />
             </Field>
           )}
@@ -1638,6 +1672,83 @@ function ExperimentalBadge() {
     <span className="shrink-0 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:text-amber-200">
       Experimental
     </span>
+  );
+}
+
+function FallbackAdapterDropdown({
+  value,
+  primaryAdapterType,
+  onChange,
+  disabledTypes,
+}: {
+  value: string | null;
+  primaryAdapterType: string;
+  onChange: (type: string | null) => void;
+  disabledTypes: Set<string>;
+}) {
+  const [open, setOpen] = useState(false);
+  // The fallback cannot be the primary adapter, and excludes disabled adapters.
+  const adapterList = useMemo(
+    () =>
+      listAdapterOptions((type) => adapterLabels[type] ?? getAdapterLabel(type)).filter(
+        (item) => !disabledTypes.has(item.value) && item.value !== primaryAdapterType,
+      ),
+    [disabledTypes, primaryAdapterType],
+  );
+  const selectedLabel = value ? (adapterLabels[value] ?? getAdapterLabel(value)) : "None";
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between">
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            {value === "opencode_local" ? <OpenCodeLogoIcon className="h-3.5 w-3.5" /> : null}
+            <span className={cn("truncate", !value && "text-muted-foreground")}>{selectedLabel}</span>
+          </span>
+          <ChevronDown className="h-3 w-3 text-muted-foreground" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-1" align="start">
+        <button
+          className={cn(
+            "flex items-center justify-between w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+            value === null && "bg-accent",
+          )}
+          onClick={() => {
+            onChange(null);
+            setOpen(false);
+          }}
+        >
+          <span className="text-muted-foreground">None (no fallback)</span>
+        </button>
+        {adapterList.map((item) => (
+          <button
+            key={item.value}
+            disabled={item.comingSoon}
+            className={cn(
+              "flex items-center justify-between w-full px-2 py-1.5 text-sm rounded",
+              item.comingSoon ? "opacity-40 cursor-not-allowed" : "hover:bg-accent/50",
+              item.value === value && !item.comingSoon && "bg-accent",
+            )}
+            onClick={() => {
+              if (!item.comingSoon) {
+                onChange(item.value);
+                setOpen(false);
+              }
+            }}
+          >
+            <span className="inline-flex items-center gap-1.5">
+              {item.value === "opencode_local" ? <OpenCodeLogoIcon className="h-3.5 w-3.5" /> : null}
+              <span>{item.label}</span>
+              {item.experimental && <ExperimentalBadge />}
+            </span>
+            {item.comingSoon && (
+              <span className="text-[10px] text-muted-foreground">Coming soon</span>
+            )}
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
   );
 }
 

@@ -14,6 +14,8 @@ export interface AgentConfigOverlay {
   identity: Record<string, unknown>;
   adapterType?: string;
   adapterConfig: Record<string, unknown>;
+  /** Fallback adapter to use when the primary hits a usage/quota limit. */
+  fallbackAdapterType?: string | null;
   heartbeat: Record<string, unknown>;
   runtime: Record<string, unknown>;
   modelProfiles?: { cheap?: AgentModelProfileOverlay };
@@ -44,6 +46,10 @@ export function buildAgentUpdatePatch(agent: Agent, overlay: AgentConfigOverlay)
 
   if (overlay.adapterType !== undefined) {
     patch.adapterType = overlay.adapterType;
+  }
+
+  if (overlay.fallbackAdapterType !== undefined) {
+    patch.fallbackAdapterType = overlay.fallbackAdapterType;
   }
 
   if (overlay.adapterType !== undefined || Object.keys(overlay.adapterConfig).length > 0) {
