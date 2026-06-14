@@ -4,27 +4,51 @@ Plano para reduzir o consumo de tokens por execução de agent no Paperclip.
 Baseado na investigação do pipeline de montagem de prompt/contexto do heartbeat.
 
 Contexto-base por execução: **~5k–40k tokens**, dominado por (1) instruções do
-agent, (2) skills da companhia e (3) contexto do issue. O número de **projetos**
-por companhia **não** afeta o custo por run (só o projeto do issue é carregado).
+agent, (2) contexto do issue (comentários + continuation summary) e (3) skills
+**efetivamente injetadas**. O número de **projetos** por companhia **não** afeta
+o custo por run (só o projeto do issue é carregado).
+
+### Como as skills realmente entram no run (importante)
+
+As skills **não** são injetadas só por estarem instaladas na companhia. O
+conjunto injetado por run é **filtrado**:
+
+- `server/src/services/company-skills.ts:4249` (`listFull`) monta a lista de
+  **metadados** de todas as skills, mas isso é só para decidir o que materializar.
+- `packages/adapters/claude-local/src/server/execute.ts:462` filtra por
+  `desiredSkillNames` antes de materializar.
+- `packages/adapter-utils/src/server-utils.ts:1809-1824`
+  (`resolvePaperclipDesiredSkillNames`): injeta **bundled/required sempre**; se o
+  agent não tem preferência explícita, injeta **só as bundled**; se tem, injeta
+  `required + as escolhidas explicitamente`.
+- `server/src/services/heartbeat.ts:8441-8449`: skills **mencionadas no issue**
+  entram só para aquele run.
+
+> Conjunto injetado por run = **bundled (sempre) + escolhidas pelo agent +
+> mencionadas no issue**. Skills usam *progressive disclosure*: ao contexto vai
+> só o frontmatter (nome + descrição); o corpo é lido sob demanda.
 
 ---
 
-## 1. Filtrar skills por tarefa/projeto (maior ROI direto)
+## 1. Filtrar skills por tarefa/projeto (ganho condicional — só com muitas skills)
 
-**Problema:** skills são carregadas company-wide a cada run — todas, sem filtro
-por projeto/tarefa.
+**Premissa corrigida:** o sistema **já filtra** as skills injetadas por
+agent (desired) + required + mencionadas no issue. Não há despejo company-wide.
+Portanto o ganho desta otimização **só existe** quando agents selecionam
+*explicitamente muitas* skills, ou quando o set de bundled/mencionadas é grande.
 
 - **Onde:** `server/src/services/company-skills.ts` (`listRuntimeSkillEntries`,
-  `listFull(companyId)`); injeção em `server/src/services/heartbeat.ts`
-  (`paperclipRuntimeSkills`).
-- **O que fazer:** aceitar `issueId`/`projectId` opcional e filtrar as skills
-  pelo escopo da tarefa (já existe filtro por `desiredSkillEntries` do agent —
-  estender para também considerar projeto/categoria). Manter compatibilidade:
-  sem escopo → comportamento atual.
-- **Ganho:** ~2k–10k tokens/run em companhias com muitas skills.
+  `listFull(companyId)`); `packages/adapter-utils/src/server-utils.ts`
+  (`resolvePaperclipDesiredSkillNames`); injeção em
+  `server/src/services/heartbeat.ts` (`paperclipRuntimeSkills`).
+- **O que fazer:** opcionalmente escopar/limitar as skills desejadas por
+  projeto/categoria da tarefa, e/ou reduzir o metadado da lista `paperclipRuntimeSkills`
+  ao que é de fato materializado. Manter compatibilidade: sem escopo →
+  comportamento atual.
+- **Ganho:** ~2k–10k tokens/run **apenas** em agents com muitas skills desejadas.
 - **Esforço:** Médio-Alto (precisa de metadados de skill por projeto + testes).
 - **Risco:** Médio (regressão se uma skill necessária for filtrada). Mitigar com
-  opt-in e fallback para "todas".
+  opt-in e fallback para o comportamento atual.
 
 ## 2. Teto/aviso de tamanho nas instruções do agent (AGENTS.md)
 
@@ -95,8 +119,9 @@ por projeto/tarefa.
 ## Ordem recomendada
 
 1. **#2** (teto/aviso AGENTS.md) — baixo risco, valor imediato.
-2. **#1** (escopar skills) — maior ganho direto.
-3. **#3** (compactar continuation summaries).
-4. **#6** (escopar workspace hints).
-5. **#5** (model profiles cheap).
+2. **#3** (compactar continuation summaries) — ganho consistente em runs de continuação.
+3. **#6** (escopar workspace hints) — baixo risco.
+4. **#5** (model profiles cheap) — custo unitário.
+5. **#1** (escopar skills) — **ganho condicional**: só vale com agents que
+   selecionam muitas skills (o sistema já filtra por desired + required + mentioned).
 6. **#4** (prompt caching) — spike de pesquisa, ganho incerto nos adapters CLI.
