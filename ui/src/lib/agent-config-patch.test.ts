@@ -192,6 +192,48 @@ describe("buildAgentUpdatePatch", () => {
     });
   });
 
+  it("persists a disabled cheap profile even when the overlay was cleared by an adapter switch", () => {
+    const agent = makeAgent();
+    agent.runtimeConfig = {
+      heartbeat: { enabled: true, intervalSec: 300 },
+      modelProfiles: { cheap: { enabled: true, adapterConfig: { model: "old-cheap" } } },
+    };
+
+    const patch = buildAgentUpdatePatch(
+      agent,
+      makeOverlay({
+        modelProfiles: { cheap: { cleared: true, enabled: false } },
+      }),
+    );
+
+    // Disabling must stick (not revert to enabled-by-default), and the previous
+    // adapter's cheap model must not bleed through.
+    expect(patch.runtimeConfig).toEqual({
+      heartbeat: { enabled: true, intervalSec: 300 },
+      modelProfiles: { cheap: { enabled: false, adapterConfig: {} } },
+    });
+  });
+
+  it("keeps a freshly chosen cheap model after an adapter switch (cleared) without bleeding the old one", () => {
+    const agent = makeAgent();
+    agent.runtimeConfig = {
+      heartbeat: { enabled: true, intervalSec: 300 },
+      modelProfiles: { cheap: { enabled: true, adapterConfig: { model: "old-cheap" } } },
+    };
+
+    const patch = buildAgentUpdatePatch(
+      agent,
+      makeOverlay({
+        modelProfiles: { cheap: { cleared: true, adapterConfig: { model: "new-cheap" } } },
+      }),
+    );
+
+    expect(patch.runtimeConfig).toEqual({
+      heartbeat: { enabled: true, intervalSec: 300 },
+      modelProfiles: { cheap: { enabled: true, adapterConfig: { model: "new-cheap" } } },
+    });
+  });
+
   it("preserves adapter-agnostic keys when changing adapter types", () => {
     const patch = buildAgentUpdatePatch(
       makeAgent(),

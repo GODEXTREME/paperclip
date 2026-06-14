@@ -147,6 +147,31 @@ export function resolveAdapterConfigBase(
   return { ...preserved, ...archived };
 }
 
+/**
+ * Resolve the cheap model profile values for display.
+ *
+ * The cheap profile lives in `runtimeConfig.modelProfiles.cheap` and is
+ * adapter-specific. When the adapter type is switched in the form, the saved
+ * cheap profile belongs to the *previous* adapter, so it must be reset rather
+ * than bled into the newly-selected adapter.
+ */
+export function resolveCheapProfileBase(
+  runtimeConfig: Record<string, unknown> | null | undefined,
+  adapterTypeSwitched: boolean,
+): { enabled: boolean; model: string; adapterConfig: Record<string, unknown> } {
+  if (adapterTypeSwitched) return { enabled: true, model: "", adapterConfig: {} };
+  const profiles = ((runtimeConfig ?? {}) as Record<string, unknown>).modelProfiles as
+    | Record<string, unknown>
+    | undefined;
+  const cheap = ((profiles ?? {}).cheap ?? {}) as Record<string, unknown>;
+  const cheapAdapterConfig = (cheap.adapterConfig ?? {}) as Record<string, unknown>;
+  return {
+    enabled: cheap.enabled !== false,
+    model: typeof cheapAdapterConfig.model === "string" ? cheapAdapterConfig.model : "",
+    adapterConfig: cheapAdapterConfig,
+  };
+}
+
 function isOverlayDirty(o: AgentConfigOverlay): boolean {
   return (
     Object.keys(o.identity).length > 0 ||
@@ -374,6 +399,12 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const adapterType = isCreate
     ? props.values.adapterType
     : overlay.adapterType ?? props.agent.adapterType;
+  // True when the adapter type was switched in the form (before saving). Used to
+  // reset adapter-specific reads that don't flow through `config` (e.g. the cheap
+  // model profile, which lives in runtimeConfig) so the previous adapter's values
+  // don't bleed into the newly-selected adapter.
+  const adapterTypeSwitched =
+    !isCreate && overlay.adapterType !== undefined && overlay.adapterType !== props.agent.adapterType;
   const getCapabilities = useAdapterCapabilities();
   const adapterCaps = getCapabilities(adapterType);
   const isLocal = adapterCaps.supportsInstructionsBundle || adapterCaps.supportsSkills || adapterCaps.supportsLocalAgentJwt;
@@ -824,16 +855,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   // Cheap profile read/write helpers. Edit-mode values come from
   // runtimeConfig.modelProfiles.cheap with overlay overrides on top; create-mode
   // values come straight from CreateConfigValues (cheapModel + cheapModelEnabled).
-  const cheapProfileFromAgent = useMemo(() => {
-    const profiles = (runtimeConfig.modelProfiles ?? {}) as Record<string, unknown>;
-    const cheap = (profiles.cheap ?? {}) as Record<string, unknown>;
-    const cheapAdapterConfig = asObject(cheap.adapterConfig);
-    return {
-      enabled: cheap.enabled !== false,
-      adapterConfig: cheapAdapterConfig,
-      model: typeof cheapAdapterConfig.model === "string" ? cheapAdapterConfig.model : "",
-    };
-  }, [runtimeConfig]);
+  const cheapProfileFromAgent = useMemo(
+    () => resolveCheapProfileBase(runtimeConfig, adapterTypeSwitched),
+    [runtimeConfig, adapterTypeSwitched],
+  );
   const cheapOverlay = !isCreate ? overlay.modelProfiles?.cheap : undefined;
   const currentCheapEnabled = isCreate
     ? val!.cheapModelEnabled ?? false
