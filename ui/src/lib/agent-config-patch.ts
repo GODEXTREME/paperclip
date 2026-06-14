@@ -92,7 +92,22 @@ export function buildAgentUpdatePatch(agent: Agent, overlay: AgentConfigOverlay)
       const nextProfiles = { ...existingProfiles };
 
       if (cheapOverlay?.cleared) {
-        delete nextProfiles.cheap;
+        // An adapter switch cleared the previous adapter's cheap profile. Honor
+        // any explicit choice the user made after switching (disabling it, or
+        // picking a new model) instead of always deleting — otherwise a disabled
+        // cheap profile would be dropped and revert to the enabled-by-default
+        // state on the next load. Drop the profile only when no explicit choice
+        // was made.
+        const explicitModel = (cheapOverlay.adapterConfig as Record<string, unknown> | undefined)?.model;
+        const hasExplicitModel = typeof explicitModel === "string" && explicitModel.length > 0;
+        if (cheapOverlay.enabled === false || hasExplicitModel) {
+          nextProfiles.cheap = {
+            enabled: cheapOverlay.enabled ?? true,
+            adapterConfig: hasExplicitModel ? { model: explicitModel } : {},
+          };
+        } else {
+          delete nextProfiles.cheap;
+        }
       } else if (cheapOverlay) {
         const mergedAdapterConfig = {
           ...((existingCheap.adapterConfig ?? {}) as Record<string, unknown>),
