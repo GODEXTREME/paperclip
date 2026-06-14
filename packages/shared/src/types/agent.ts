@@ -31,6 +31,26 @@ export interface AgentRuntimeConfig extends Record<string, unknown> {
   modelProfiles?: Partial<Record<ModelProfileKey, AgentModelProfileConfig>>;
 }
 
+/**
+ * Runtime activation state for the adapter usage-limit fallback.
+ *
+ * When the primary adapter hits a usage/quota limit (a transient upstream
+ * failure that carries a reset window), the agent is swapped onto its
+ * configured fallback adapter so work keeps flowing. This record remembers the
+ * primary adapter and its reset time so the agent can automatically revert once
+ * the primary's usage window resets. It is `null` whenever the agent is running
+ * on its primary adapter.
+ */
+export interface AdapterFallbackState {
+  active: boolean;
+  /** Adapter the agent will revert to once the primary's window resets. */
+  primaryAdapterType: AgentAdapterType;
+  /** ISO timestamp of when the primary adapter's usage window resets. */
+  primaryResetAt: string | null;
+  /** ISO timestamp of when the fallback was activated. */
+  activatedAt: string;
+}
+
 export type AgentInstructionsBundleMode = "managed" | "external";
 
 export interface AgentInstructionsFileSummary {
@@ -90,6 +110,17 @@ export interface Agent {
   capabilities: string | null;
   adapterType: AgentAdapterType;
   adapterConfig: Record<string, unknown>;
+  /**
+   * Saved adapter config for every adapter type this agent has been configured
+   * with, keyed by adapter type. Lets the UI restore previous settings when the
+   * active adapter is switched back, instead of losing them. Always present on
+   * responses from the server; optional here so fixtures/partials stay terse.
+   */
+  adapterConfigArchive?: Record<string, Record<string, unknown>>;
+  /** Adapter to fall back to when the primary hits a usage/quota limit. */
+  fallbackAdapterType?: AgentAdapterType | null;
+  /** Runtime fallback activation state, or null when on the primary adapter. */
+  fallbackState?: AdapterFallbackState | null;
   runtimeConfig: AgentRuntimeConfig;
   defaultEnvironmentId?: string | null;
   budgetMonthlyCents: number;

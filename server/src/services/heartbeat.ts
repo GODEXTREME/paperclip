@@ -157,6 +157,14 @@ import {
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
 import { recoveryService } from "./recovery/service.js";
+import {
+  buildFallbackRevertPlan,
+  buildFallbackSwapPlan,
+  parseFallbackState,
+  shouldActivateUsageLimitFallback,
+  shouldRevertFallback,
+  type AdapterSwapPlan,
+} from "./adapter-fallback.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
 import {
@@ -4587,6 +4595,124 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows.length);
   }
 
+  /**
+   * Apply an adapter swap/revert plan: persist the new active adapter + config,
+   * archive, and fallback state, then reset the runtime session (a new adapter
+   * cannot resume the previous adapter's session). Returns the reloaded agent.
+   */
+  async function applyAdapterFallbackPlan(
+    agent: typeof agents.$inferSelect,
+    plan: AdapterSwapPlan,
+  ): Promise<typeof agents.$inferSelect> {
+    await db
+      .update(agents)
+      .set({
+        adapterType: plan.adapterType,
+        adapterConfig: plan.adapterConfig,
+        adapterConfigArchive: plan.adapterConfigArchive,
+        fallbackState: (plan.fallbackState ?? null) as Record<string, unknown> | null,
+        updatedAt: new Date(),
+      })
+      .where(eq(agents.id, agent.id));
+
+    await db
+      .update(agentRuntimeState)
+      .set({
+        adapterType: plan.adapterType,
+        sessionId: null,
+        stateJson: {},
+        lastError: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(agentRuntimeState.agentId, agent.id));
+    await clearTaskSessions(agent.companyId, agent.id);
+
+    const reloaded = await getAgent(agent.id);
+    return (
+      reloaded ?? {
+        ...agent,
+        adapterType: plan.adapterType,
+        adapterConfig: plan.adapterConfig,
+        adapterConfigArchive: plan.adapterConfigArchive,
+        fallbackState: (plan.fallbackState ?? null) as Record<string, unknown> | null,
+      }
+    );
+  }
+
+  /**
+   * Swap the agent onto its configured fallback adapter when the primary just hit
+   * a usage/quota limit (a transient failure carrying a reset window). Returns the
+   * swapped agent, or null when no swap applies.
+   */
+  async function maybeActivateUsageLimitFallback(input: {
+    agent: typeof agents.$inferSelect;
+    retryNotBefore: Date | null;
+    now?: Date;
+  }): Promise<typeof agents.$inferSelect | null> {
+    const { agent, retryNotBefore } = input;
+    const fallbackState = parseFallbackState(agent.fallbackState);
+    if (
+      !shouldActivateUsageLimitFallback({
+        currentAdapterType: agent.adapterType,
+        fallbackAdapterType: agent.fallbackAdapterType,
+        retryNotBefore,
+        fallbackState,
+      })
+    ) {
+      return null;
+    }
+    const plan = buildFallbackSwapPlan({
+      currentAdapterType: agent.adapterType,
+      currentAdapterConfig: parseObject(agent.adapterConfig),
+      fallbackAdapterType: agent.fallbackAdapterType!,
+      adapterConfigArchive: agent.adapterConfigArchive,
+      primaryResetAt: retryNotBefore!,
+      now: input.now ?? new Date(),
+    });
+    logger.info(
+      {
+        agentId: agent.id,
+        companyId: agent.companyId,
+        from: agent.adapterType,
+        to: plan.adapterType,
+        primaryResetAt: retryNotBefore!.toISOString(),
+      },
+      "adapter usage-limit fallback activating",
+    );
+    return applyAdapterFallbackPlan(agent, plan);
+  }
+
+  /**
+   * Revert the agent from its fallback adapter back to the primary once the
+   * primary's usage window has reset. Lazy: invoked at run start. Returns the
+   * (possibly unchanged) agent.
+   */
+  async function maybeRevertAdapterFallback(
+    agent: typeof agents.$inferSelect,
+    now = new Date(),
+  ): Promise<typeof agents.$inferSelect> {
+    const fallbackState = parseFallbackState(agent.fallbackState);
+    if (!shouldRevertFallback({ fallbackState, currentAdapterType: agent.adapterType, now })) {
+      return agent;
+    }
+    const plan = buildFallbackRevertPlan({
+      currentAdapterType: agent.adapterType,
+      currentAdapterConfig: parseObject(agent.adapterConfig),
+      fallbackState: fallbackState!,
+      adapterConfigArchive: agent.adapterConfigArchive,
+    });
+    logger.info(
+      {
+        agentId: agent.id,
+        companyId: agent.companyId,
+        from: agent.adapterType,
+        to: plan.adapterType,
+      },
+      "adapter usage-limit fallback reverting to primary",
+    );
+    return applyAdapterFallbackPlan(agent, plan);
+  }
+
   async function ensureRuntimeState(agent: typeof agents.$inferSelect) {
     const existing = await getRuntimeState(agent.id);
     if (existing) return existing;
@@ -6070,11 +6196,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
         ? readTransientRecoveryContractFromRun(run)
         : null;
+    // When the primary adapter hits a usage/quota limit (a transient failure
+    // carrying a reset window) and a fallback adapter is configured, swap onto
+    // the fallback so work continues immediately rather than idling until the
+    // primary's window resets.
+    const fallbackSwapAgent = transientRecovery?.retryNotBefore
+      ? await maybeActivateUsageLimitFallback({
+          agent,
+          retryNotBefore: transientRecovery.retryNotBefore,
+          now,
+        })
+      : null;
+    if (fallbackSwapAgent) agent = fallbackSwapAgent;
     const codexTransientFallbackMode =
       agent.adapterType === "codex_local" && transientRecovery
         ? resolveCodexTransientFallbackMode(nextAttempt)
         : null;
-    const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
+    // After a swap, run immediately on the fallback instead of waiting for the
+    // primary adapter's reset time.
+    const transientRetryNotBefore = fallbackSwapAgent
+      ? null
+      : (transientRecovery?.retryNotBefore ?? null);
 
     if (!baseSchedule) {
       await appendRunEvent(run, await nextRunEventSeq(run.id), {
@@ -7758,7 +7900,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     activeRunExecutions.add(run.id);
 
     try {
-    const agent = await getAgent(run.agentId);
+    let agent = await getAgent(run.agentId);
     if (!agent) {
       await setRunStatus(runId, "failed", {
         error: "Agent not found",
@@ -7773,6 +7915,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (failedRun) await releaseIssueExecutionAndPromote(failedRun);
       return;
     }
+
+    // If the agent is running on a usage-limit fallback and the primary adapter's
+    // window has since reset, revert to the primary before executing this run.
+    agent = await maybeRevertAdapterFallback(agent);
 
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);

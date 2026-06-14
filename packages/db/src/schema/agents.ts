@@ -25,6 +25,20 @@ export const agents = pgTable(
     capabilities: text("capabilities"),
     adapterType: text("adapter_type").notNull().default("process"),
     adapterConfig: jsonb("adapter_config").$type<Record<string, unknown>>().notNull().default({}),
+    // Per-adapter-type config archive. Keyed by adapter type so switching the
+    // active adapter (e.g. codex_local -> claude_local) preserves the config of
+    // every adapter the agent has previously been configured with.
+    adapterConfigArchive: jsonb("adapter_config_archive")
+      .$type<Record<string, Record<string, unknown>>>()
+      .notNull()
+      .default({}),
+    // Adapter the agent falls back to when the primary adapter hits a usage/quota
+    // limit. Its config lives in adapterConfigArchive under this type.
+    fallbackAdapterType: text("fallback_adapter_type"),
+    // Runtime activation state for the fallback swap (null when running on the
+    // primary adapter). Tracks the primary adapter and its reset window so the
+    // agent can automatically revert once the primary's usage window resets.
+    fallbackState: jsonb("fallback_state").$type<Record<string, unknown>>(),
     runtimeConfig: jsonb("runtime_config").$type<Record<string, unknown>>().notNull().default({}),
     defaultEnvironmentId: uuid("default_environment_id").references(() => environments.id, { onDelete: "set null" }),
     budgetMonthlyCents: integer("budget_monthly_cents").notNull().default(0),

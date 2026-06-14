@@ -2337,6 +2337,18 @@ export function agentRoutes(
       ...createInput
     } = req.body;
     createInput.adapterType = assertKnownAdapterType(createInput.adapterType);
+    // Normalize the optional fallback adapter and seed its archived config.
+    let createFallbackArchive: Record<string, Record<string, unknown>> | undefined;
+    if (createInput.fallbackAdapterType === null || createInput.fallbackAdapterType === undefined) {
+      createInput.fallbackAdapterType = null;
+    } else {
+      const fallbackType = assertKnownAdapterType(createInput.fallbackAdapterType);
+      if (fallbackType === createInput.adapterType) {
+        throw unprocessable("Fallback adapter must differ from the primary adapter");
+      }
+      createInput.fallbackAdapterType = fallbackType;
+      createFallbackArchive = { [fallbackType]: applyCreateDefaultsByAdapterType(fallbackType, {}) };
+    }
     const rawCreateAdapterConfig = (createInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertNoNewAgentLegacyPromptTemplate(
       createInput.adapterType,
@@ -2374,6 +2386,7 @@ export function agentRoutes(
     const createdAgent = await svc.create(companyId, {
       ...createInput,
       adapterConfig: normalizedAdapterConfig,
+      ...(createFallbackArchive ? { adapterConfigArchive: createFallbackArchive } : {}),
       runtimeConfig: normalizedRuntimeConfig,
       status: "idle",
       spentMonthlyCents: 0,
@@ -2779,6 +2792,38 @@ export function agentRoutes(
       assertNoAgentRuntimeConfigAdapterConfigMutation(req, runtimeConfig);
       requestedRuntimeConfig = runtimeConfig;
     }
+
+    // Per-adapter-type config archive: lets us preserve (and later restore) the
+    // settings of every adapter the agent has been configured with, instead of
+    // losing them when the active adapter is switched.
+    const existingAdapterArchive = (asRecord(existing.adapterConfigArchive) ??
+      {}) as Record<string, Record<string, unknown>>;
+    let nextAdapterArchive: Record<string, Record<string, unknown>> | null = null;
+
+    // Validate / normalize the optional fallback adapter selection.
+    let fallbackArchiveSeed: { type: string; config: Record<string, unknown> } | null = null;
+    if (hasOwn(patchData, "fallbackAdapterType")) {
+      const rawFallback = patchData.fallbackAdapterType;
+      if (rawFallback === null || (typeof rawFallback === "string" && rawFallback.trim() === "")) {
+        patchData.fallbackAdapterType = null;
+      } else {
+        const fallbackType = assertKnownAdapterType(rawFallback as string | null | undefined);
+        if (fallbackType === requestedAdapterType) {
+          res.status(422).json({ error: "Fallback adapter must differ from the primary adapter" });
+          return;
+        }
+        patchData.fallbackAdapterType = fallbackType;
+        // Seed a usable config for the fallback adapter when we've never stored
+        // one, so the heartbeat can swap onto it even before the user customizes it.
+        if (!asRecord(existingAdapterArchive[fallbackType])) {
+          fallbackArchiveSeed = {
+            type: fallbackType,
+            config: applyCreateDefaultsByAdapterType(fallbackType, {}),
+          };
+        }
+      }
+    }
+
     const touchesAdapterConfiguration =
       hasOwn(patchData, "adapterType") ||
       hasOwn(patchData, "adapterConfig");
@@ -2798,9 +2843,18 @@ export function agentRoutes(
       ) {
         await assertCanManageInstructionsPath(req, existing);
       }
-      let rawEffectiveAdapterConfig = requestedAdapterConfig ?? existingAdapterConfig;
-      if (requestedAdapterConfig && !changingAdapterType && !replaceAdapterConfig) {
-        rawEffectiveAdapterConfig = { ...existingAdapterConfig, ...requestedAdapterConfig };
+      // When switching adapter type without an explicit config, restore the new
+      // adapter's previously-saved config from the archive so the user gets their
+      // old settings back instead of bare defaults.
+      let rawEffectiveAdapterConfig: Record<string, unknown>;
+      if (changingAdapterType) {
+        const archivedForNewType = asRecord(existingAdapterArchive[requestedAdapterType]) ?? {};
+        rawEffectiveAdapterConfig = requestedAdapterConfig ?? archivedForNewType;
+      } else {
+        rawEffectiveAdapterConfig = requestedAdapterConfig ?? existingAdapterConfig;
+        if (requestedAdapterConfig && !replaceAdapterConfig) {
+          rawEffectiveAdapterConfig = { ...existingAdapterConfig, ...requestedAdapterConfig };
+        }
       }
       if (changingAdapterType) {
         // Preserve adapter-agnostic keys (env, cwd, etc.) from the existing config
@@ -2819,6 +2873,11 @@ export function agentRoutes(
           existingAdapterConfig,
           rawEffectiveAdapterConfig,
         );
+        // Archive the outgoing adapter's config so switching back restores it.
+        nextAdapterArchive = {
+          ...existingAdapterArchive,
+          [existing.adapterType]: existingAdapterConfig,
+        };
       }
       const effectiveAdapterConfig = applyCreateDefaultsByAdapterType(
         requestedAdapterType,
@@ -2830,6 +2889,16 @@ export function agentRoutes(
         adapterConfig: effectiveAdapterConfig,
       });
       patchData.adapterConfig = syncInstructionsBundleConfigFromFilePath(existing, normalizedEffectiveAdapterConfig);
+    }
+
+    if (fallbackArchiveSeed) {
+      nextAdapterArchive = {
+        ...(nextAdapterArchive ?? existingAdapterArchive),
+        [fallbackArchiveSeed.type]: fallbackArchiveSeed.config,
+      };
+    }
+    if (nextAdapterArchive) {
+      patchData.adapterConfigArchive = nextAdapterArchive;
     }
     if (requestedRuntimeConfig) {
       const baseAdapterConfig = asRecord(patchData.adapterConfig) ?? asRecord(existing.adapterConfig) ?? {};
