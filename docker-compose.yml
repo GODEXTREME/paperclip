@@ -1,0 +1,45 @@
+# Self-hosted Paperclip — build a partir deste repositório (código modificado).
+#
+# IMPORTANTE (não perca dados):
+#  - Seus dados (Postgres embarcado, config, secrets) ficam em /paperclip.
+#  - O volume `paperclip-data` é marcado como `external: true` de propósito:
+#    ele DEVE ser criado e populado com seus dados existentes ANTES do `up`.
+#    Veja docs/self-host-migration.md para o passo a passo de migração segura.
+#  - PAPERCLIP_MIGRATION_AUTO_APPLY=true garante que a migration 0102
+#    (adapter persistence + fallback) seja aplicada no boot, contra o seu banco
+#    já existente. É uma migração aditiva (ADD COLUMN), não destrutiva.
+
+services:
+  paperclip:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: paperclip:local
+    container_name: paperclip
+    restart: unless-stopped
+
+    ports:
+      - "3100:3100"
+
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3100"
+      SERVE_UI: "true"
+
+      PAPERCLIP_HOME: "/paperclip"
+      PAPERCLIP_INSTANCE_ID: "default"
+      PAPERCLIP_CONFIG: "/paperclip/instances/default/config.json"
+
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
+
+      # Aplica migrations pendentes automaticamente no startup (inclui a 0102).
+      PAPERCLIP_MIGRATION_AUTO_APPLY: "true"
+
+    volumes:
+      - paperclip-data:/paperclip
+
+volumes:
+  paperclip-data:
+    # Pré-criado e populado com seus dados atuais. Veja docs/self-host-migration.md.
+    external: true
