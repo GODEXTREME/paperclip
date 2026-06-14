@@ -1,7 +1,33 @@
 import { describe, expect, it } from "vitest";
 import type { Environment } from "@paperclipai/shared";
-import { resolveAdapterConfigBase, supportsAdapterModelRefresh } from "./AgentConfigForm";
+import {
+  resolveAdapterConfigBase,
+  resolveCheapProfileBase,
+  supportsAdapterModelRefresh,
+} from "./AgentConfigForm";
 import { resolveForcedKubernetesEnvironment } from "../lib/forced-kubernetes-environment";
+
+describe("resolveCheapProfileBase", () => {
+  const runtimeConfig = {
+    modelProfiles: { cheap: { enabled: true, adapterConfig: { model: "gpt-4o-mini" } } },
+  };
+
+  it("returns the saved cheap profile when the adapter type is not switched", () => {
+    expect(resolveCheapProfileBase(runtimeConfig, false)).toEqual({
+      enabled: true,
+      model: "gpt-4o-mini",
+    });
+  });
+
+  it("resets the cheap model when the adapter type was switched (no bleed)", () => {
+    expect(resolveCheapProfileBase(runtimeConfig, true)).toEqual({ enabled: true, model: "" });
+  });
+
+  it("handles a missing cheap profile", () => {
+    expect(resolveCheapProfileBase({}, false)).toEqual({ enabled: true, model: "" });
+    expect(resolveCheapProfileBase(null, false)).toEqual({ enabled: true, model: "" });
+  });
+});
 
 describe("resolveAdapterConfigBase", () => {
   const agent = {
